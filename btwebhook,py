@@ -14,18 +14,18 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO) # Or logging.DEBUG, logging.WARNING, etc.
 
 # BT_ENVironment variable for Slack channel ID, or use fallback
-channel_id = os.BT_ENViron.get("SLACK_CHANNEL_ID")
+channel_id = os.environ.get("SLACK_CHANNEL_ID")
 
 ses_client = boto3.client('ses', region_name='us-east-1')  # Change region as needed
-slack_client = WebClient(token=os.BT_ENViron.get("SLACK_BOT_TOKEN"))
+slack_client = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
 
 # BT_ENVironment variable for CC email
-CC_EMAIL = os.BT_ENViron.get("CC_EMAIL")
-SENDER_EMAIL = os.BT_ENViron.get("SENDER_EMAIL")  # Must be verified in SES
-BT_MERCHANT_ID = os.BT_ENViron.get("BT_MERCHANT_ID") 
-BT_PUBLIC_KEY = os.BT_ENViron.get("BT_PUBLIC_KEY") 
-BT_PRIVATE_KEY = os.BT_ENViron.get("BT_PRIVATE_KEY")
-BT_ENV = os.BT_ENViron.get("BT_ENV","production")
+CC_EMAIL = os.environ.get("CC_EMAIL")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL")  # Must be verified in SES
+BT_MERCHANT_ID = os.environ.get("BT_MERCHANT_ID") 
+BT_PUBLIC_KEY = os.environ.get("BT_PUBLIC_KEY") 
+BT_PRIVATE_KEY = os.environ.get("BT_PRIVATE_KEY")
+BT_ENV = os.environ.get("BT_ENV","production")
 
 if not BT_MERCHANT_ID or not BT_PUBLIC_KEY or not BT_PRIVATE_KEY:
     logger.error("Missing Braintree BT_ENVironment variables")
