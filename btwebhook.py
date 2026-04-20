@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+import json
+
+import boto3
+import os
+import logging
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+import base64
+import urllib.parse
+from urllib.parse import urlparse, parse_qs
+import braintree
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO) # Or logging.DEBUG, logging.WARNING, etc.
+
+# Environment variable for Slack channel ID, or use fallback
+channel_id = os.environ.get("SLACK_CHANNEL_ID")
+
+ses_client = boto3.client('ses', region_name='us-east-1')  # Change region as needed
+slack_client = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
+
+# Environment variable for CC email
+CC_EMAIL = os.environ.get("CC_EMAIL")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL")  # Must be verified in SES
+BT_MERCHANT_ID = os.environ.get("BT_MERCHANT_ID")
+BT_PUBLIC_KEY = os.environ.get("BT_PUBLIC_KEY")
+BT_PRIVATE_KEY = os.environ.get("BT_PRIVATE_KEY")
+BT_ENV = os.environ.get("BT_ENV","production")
+
+if not BT_MERCHANT_ID or not BT_PUBLIC_KEY or not BT_PRIVATE_KEY:
+    logger.error("Missing Braintree environment variables")
+    exit(1)
+# Initialize your Braintree gateway
+
+if BT_ENV.lower() == "sandbox":
+  gateway = braintree.BraintreeGateway(
+  braintree.Configuration(braintree.Environment.Sandbox,
+        merchant_id=BT_MERCHANT_ID, public_key=BT_PUBLIC_KEY, private_key=BT_PRIVATE_KEY)
+)
+else:
+  gateway = braintree.BraintreeGateway(
+  braintree.Configuration(braintree.Environment.Production,
+        merchant_id=BT_MERCHANT_ID, public_key=BT_PUBLIC_KEY, private_key=BT_PRIVATE_KEY)
+)
+
+result="NaN"
+why="NaN"
+whymore="NaN"
+email="NaN"
+gateway_rejection = "NaN"
+
+def handle_SettlementFailure(webhook_notification, kind):
+    logger.debug(f"Handling a {kind} event.")
+    try:
+        trans=webhook_notification.transaction
+        if trans:
+            answer=trans.processor_response_type
+            why = trans.processor_response_text
+            whymore = trans.additional_processor_response
+            who = trans.customer_details.first_name + " " + trans.customer_details.last_name
+            email = trans.customer_details.email
+            gateway_rejection = trans.gateway_rejection_reason
+        mess=f"Braintree reports {kind}, {answer} due to {why} ({whymore}) for {who} mailto:{email}."
+        logger.info(mess)
+        result = slack_client.chat_postMessage(channel=channel_id,
+        text=mess
+        )
+        logger.info(result)
+
+    except SlackApiError as e:
+        logger.error(str(e))
+        return {  "statusCode": 500,
+            "body": json.dumps({"Slack error": str(e)})
+        }
+    except Exception as e:
+        logger.error(str(e))
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
+
+def handle_SubscriptionFailure(webhook_notification, kind):
+    logger.debug(f"Handling a {kind} event.")
+    try:
+        plan = webhook_notification.subscription.plan_id
+        overdue = webhook_notification.subscription.days_past_due
+        # Probably shouldn't assume USD as the currency.
+        price = "$" + str(webhook_notification.subscription.price)
+        trans=webhook_notification.subscription.transactions[0]
+        if trans:
+            who = trans.customer_details.first_name + " " + trans.customer_details.last_name
+            email = trans.customer_details.email
+        mess=f"Braintree reports {kind} for plan  {plan} at subscription rate {price} for {who} mailto:{email}."
+        if (overdue > 0):
+            mess += f" {overdue} days overdue."
+        logger.info(mess)
+        result = slack_client.chat_postMessage(channel=channel_id,text=mess)
+        logger.info(result)
+
+    except SlackApiError as e:
+        logger.error(str(e))
+        return {  "statusCode": 500,
+            "body": json.dumps({"Slack error": str(e)})
+        }
+    except Exception as e:
+        logger.error(str(e))
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
+
+def lambda_handler(event, context):
+    logger.debug(f"Received event: {json.dumps(event)}")
+
+    if 'body' in event and event['body']:
+        logger.debug("Got body {event['body']}.")
+    else:
+        logger.error("Event has no body, cannot proceed")
+        return {
+                "statusCode": 400,
+                "body": json.dumps({"message": "Missing event body"})
+            }
+
+    bt_payload=str("NAN")
+    bt_signature =str("NAN")
+    try:
+        # Parse the Braintree webhook
+        body = (event.get("body"))
+        decoded = base64.b64decode(body).decode("UTF-8")
+        parsed = urlparse("?" + decoded)
+        params = parse_qs(parsed.query)
+        if "bt_signature" in params and "bt_payload" in params:
+            bt_signature = params["bt_signature"][0]
+            bt_payload = params["bt_payload"][0]
+            logger.debug(f"signature={bt_signature},payload={bt_payload}.")
+        else:
+            logger.error("Missing bt_signature and/or bt_payload in params")
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"message": "Missing bt_signature and/or bt_payload in params"})
+            }
+        webhook_notification = gateway.webhook_notification.parse(str(bt_signature),bt_payload)
+        kind=webhook_notification.kind
+        logger.info(f"kind={kind}")
+
+        result = slack_client.chat_postMessage(
+            channel=channel_id,
+            text=f"Braintree sent {kind} event."
+        )
+        logger.info(result)
+
+    except SlackApiError as e:
+        logger.error(str(e))
+
+    if (kind == braintree.WebhookNotification.Kind.Check):
+        logger.info(f"Handled a {kind} test event.")
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"message": "Handled a webhook test event."})
+        }
+
+    if kind in [
+        "subscription_canceled",
+        "subscription_went_past_due",
+        "subscription_charged_unsuccessfully",
+        "subscription_charged_successfully"
+        ]:
+        handle_SubscriptionFailure(webhook_notification, kind)
+        logger.info(f"Handled a {kind} event.")
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"message": f"Handled the {kind} event."})
+        }
+
+    if(kind == braintree.WebhookNotification.Kind.TransactionSettlementDecline):
+        handle_SettlementFailure(webhook_notification, kind)
+        logger.info(f"Handled a {kind} event.")
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"message": f"Handled the {kind} event."})
+        }
+
+    # Just return if this isn't a failed transaction
+    logger.info(f"Handled a {kind} event.")
+    return {
+        "statusCode": 200,
+        "body": json.dumps({f"message": f"Unsupported event {kind}"})
+        }
